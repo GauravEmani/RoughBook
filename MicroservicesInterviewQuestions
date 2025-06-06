@@ -1,0 +1,20 @@
+Questions
+
+16. Security in microservices (OAuth2, JWT)
+17. Handling distributed transactions
+18. Eventual consistency — how it’s achieved
+19. API versioning strategies
+20. Saga pattern for service failures
+21. Monitoring & Logging best practices
+22. Design principles & best practices
+23. Unit, integration, and contract testing
+24. DB per service vs shared DB
+25. Anti-patterns in microservices design
+26. Orchestration vs Choreography
+27. Idempotent operations & importance
+28. High availability & fault tolerance
+29. CI/CD, Docker, Kubernetes for deployment
+30. Message brokers in microservices (Kafka, RabbitMQ)
+
+
+Answers
