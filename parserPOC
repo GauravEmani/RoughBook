@@ -1,0 +1,201 @@
+That's an excellent next step! Identifying the specific methods used requires a slightly deeper analysis within the visitMethodInvocation part of the AST scanner.
+Here is the modified Java code that extends the CodeAnalyzer to record the methods used from the targeted JAR classes.
+Modified Java Code Analyzer
+The main change is in the recordUsage method and how the results are stored, and the visitMethodInvocation is updated to capture the method name.
+1. Updated Data Structures
+The usageMap must now store method-level detail:
+2. CodeAnalyzer.java (Modified)
+import com.sun.source.tree.*;
+import com.sun.source.util.*;
+import javax.tools.JavaCompiler;
+import javax.tools.ToolProvider;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.util.*;
+import java.util.stream.Collectors;
+
+public class CodeAnalyzer {
+
+    // Configuration: Map of target classes/packages to the JAR they belong to
+    private static final Map<String, String> TARGET_JARS = Map.of(
+        "org.apache.commons.lang3.StringUtils", "commons-lang3.jar",
+        "com.google.gson.Gson", "gson.jar",
+        "java.util.List", "jre-core.jar"
+    );
+
+    // MODIFIED: Store results as: JarName -> TargetClass -> UsingClass -> Set of Methods Used
+    private final Map<String, Map<String, Map<String, Set<String>>>> usageMap = new HashMap<>();
+   
+    // Tracks the current class being analyzed to record usages
+    private String currentClassName = "";
+
+    public static void main(String[] args) throws IOException {
+        if (args.length < 1) {
+            System.out.println("Usage: java CodeAnalyzer <path/to/java/source/dir>");
+            return;
+        }
+
+        File sourceDir = new File(args[0]);
+        if (!sourceDir.isDirectory()) {
+            System.err.println("Error: Provided path is not a directory.");
+            return;
+        }
+
+        List<File> javaFiles = Files.walk(sourceDir.toPath())
+            .filter(p -> p.toString().endsWith(".java"))
+            .map(java.nio.file.Path::toFile)
+            .collect(Collectors.toList());
+
+        if (javaFiles.isEmpty()) {
+            System.out.println("No .java files found in the directory.");
+            return;
+        }
+
+        CodeAnalyzer analyzer = new CodeAnalyzer();
+        analyzer.analyzeFiles(javaFiles, args[0]);
+        analyzer.printResults();
+    }
+
+    private void analyzeFiles(List<File> javaFiles, String sourceRoot) {
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        JavacTask task = (JavacTask) compiler.getTask(
+            null, null, null, null, null,
+            compiler.getStandardJavaFileManager(null, null, null).getJavaFileObjectsFromFiles(javaFiles)
+        );
+
+        try {
+            Iterable<? extends CompilationUnitTree> units = task.parse();
+            for (CompilationUnitTree unit : units) {
+                currentClassName = getClassName(unit, sourceRoot);
+                new UsageScanner(task).scan(unit, null);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+   
+    private String getClassName(CompilationUnitTree unit, String sourceRoot) {
+        String path = unit.getSourceFile().getName().replace(sourceRoot, "");
+        return path.replaceAll("^[/\\\\]*", "").replace(".java", "").replace(File.separatorChar, '.');
+    }
+
+    // MODIFIED: Takes the method name as an argument
+    private void recordUsage(String targetFullClass, String methodName) {
+        String jarName = TARGET_JARS.get(targetFullClass);
+        if (jarName != null) {
+            // Check if it's a type usage (methodName will be null or "Type/Variable Use")
+            String method = (methodName != null && !methodName.isEmpty()) ? methodName : "Type/Variable Use";
+           
+            usageMap
+                .computeIfAbsent(jarName, k -> new HashMap<>())
+                .computeIfAbsent(targetFullClass, k -> new HashMap<>())
+                .computeIfAbsent(currentClassName, k -> new HashSet<>())
+                .add(method);
+        }
+    }
+
+    private void printResults() {
+        System.out.println("\n=======================================================");
+        System.out.println("JAR, CLASS, AND METHOD USAGE ANALYSIS");
+        System.out.println("=======================================================");
+       
+        if (usageMap.isEmpty()) {
+            System.out.println("No usages of the target JAR classes found.");
+            return;
+        }
+
+        for (Map.Entry<String, Map<String, Map<String, Set<String>>>> jarEntry : usageMap.entrySet()) {
+            String jarName = jarEntry.getKey();
+            System.out.println("\n🎯 JAR: " + jarName);
+            System.out.println("-------------------------------------------------------");
+
+            for (Map.Entry<String, Map<String, Set<String>>> classEntry : jarEntry.getValue().entrySet()) {
+                String targetClass = classEntry.getKey();
+                System.out.println("  -> Target Class: " + targetClass);
+
+                for (Map.Entry<String, Set<String>> usingClassEntry : classEntry.getValue().entrySet()) {
+                    String usingClass = usingClassEntry.getKey();
+                    Set<String> methodsUsed = usingClassEntry.getValue();
+                   
+                    System.out.println("     Used in Class: " + usingClass);
+                    System.out.println("       Methods/Usages: " + String.join(", ", methodsUsed));
+                }
+            }
+        }
+    }
+
+    // --- AST Scanner Implementation ---
+    private class UsageScanner extends TreePathScanner<Void, Void> {
+       
+        private final Trees trees;
+        private final Map<String, String> simpleToFullImport = new HashMap<>();
+
+        public UsageScanner(JavacTask task) {
+            this.trees = Trees.instance(task);
+        }
+
+        @Override
+        public Void visitImport(ImportTree node, Void p) {
+            String importedName = node.getQualifiedIdentifier().toString();
+           
+            // Map direct imports
+            if (TARGET_JARS.containsKey(importedName)) {
+                simpleToFullImport.put(importedName.substring(importedName.lastIndexOf('.') + 1), importedName);
+            }
+            // Map wildcard imports
+            else if (importedName.endsWith(".*")) {
+                String packageName = importedName.substring(0, importedName.length() - 2);
+                for (String targetClass : TARGET_JARS.keySet()) {
+                    if (targetClass.startsWith(packageName + ".")) {
+                        simpleToFullImport.put(targetClass.substring(targetClass.lastIndexOf('.') + 1), targetClass);
+                    }
+                }
+            }
+            return super.visitImport(node, p);
+        }
+
+        // MODIFIED: Extract the method name from the MethodInvocationTree
+        @Override
+        public Void visitMethodInvocation(MethodInvocationTree node, Void p) {
+            if (node.getMethodSelect() instanceof MemberSelectTree) {
+                MemberSelectTree mst = (MemberSelectTree) node.getMethodSelect();
+                String simpleClassName = mst.getExpression().toString();
+               
+                if (simpleToFullImport.containsKey(simpleClassName)) {
+                    // Method name is the identifier part of the MemberSelectTree
+                    String methodName = mst.getIdentifier().toString();
+                    recordUsage(simpleToFullImport.get(simpleClassName), methodName);
+                }
+            }
+            return super.visitMethodInvocation(node, p);
+        }
+       
+        // Retains type usage tracking (no specific method name is relevant here)
+        @Override
+        public Void visitVariable(VariableTree node, Void p) {
+            if (node.getType() != null) {
+                String typeName = node.getType().toString();
+                if (simpleToFullImport.containsKey(typeName)) {
+                    // Method name is null/empty for type usage
+                    recordUsage(simpleToFullImport.get(typeName), "Type/Variable Use");
+                }
+            }
+            return super.visitVariable(node, p);
+        }
+    }
+}
+
+Key Modification Details
+* Modified usageMap:
+   * The structure is deepened to: Map<String, Map<String, Map<String, Set<String>>>>.
+   * It now tracks: JarName \rightarrow TargetClass \rightarrow UsingClass \rightarrow Set<MethodName>.
+* Modified recordUsage:
+   * It now accepts a second argument, methodName.
+   * It handles two usage types:
+     * Method Usage: Records the specific method name (e.g., "isEmpty").
+     * Type Usage: Records a generic string (e.g., "Type/Variable Use") when the class is used for a variable declaration (from visitVariable).
+* Modified visitMethodInvocation:
+   * After identifying the target class using the simpleToFullImport map, it extracts the method name using mst.getIdentifier().toString().
+   * It passes this specific method name to the new recordUsage method.
+This modified approach provides the precise method-level detail you requested. 
